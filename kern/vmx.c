@@ -126,6 +126,11 @@ static inline bool cpu_has_vmx_ept(void)
         SECONDARY_EXEC_ENABLE_EPT;
 }
 
+static inline bool cpu_has_vmx_vmfunc(void)
+{
+    return 1;//vmcs_config.cpu_based_2nd_exec_ctrl & SECONDARY_EXEC_ENABLE_VMFUNC;
+}
+
 static inline bool cpu_has_vmx_invept_individual_addr(void)
 {
     return vmx_capability.ept & VMX_EPT_EXTENT_INDIVIDUAL_BIT;
@@ -382,7 +387,8 @@ static __init int setup_vmcs_config(struct vmcs_config *vmcs_conf)
             SECONDARY_EXEC_ENABLE_VPID |
             SECONDARY_EXEC_ENABLE_EPT |
             SECONDARY_EXEC_RDTSCP |
-            SECONDARY_EXEC_ENABLE_INVPCID;
+            SECONDARY_EXEC_ENABLE_INVPCID |
+	    0x00002000;//SECONDARY_EXEC_ENABLE_VMFUNC;
         if (adjust_vmx_controls(min2, opt2,
                     MSR_IA32_VMX_PROCBASED_CTLS2,
                     &_cpu_based_2nd_exec_control) < 0)
@@ -629,6 +635,7 @@ static void __vmx_get_cpu_helper(void *ptr)
 static void vmx_get_cpu(struct vmx_vcpu *vcpu)
 {
     int cur_cpu = get_cpu();
+    unsigned ept_index;
 
     if (__get_cpu_var(local_vcpu) != vcpu) {
         __get_cpu_var(local_vcpu) = vcpu;
@@ -641,7 +648,8 @@ static void vmx_get_cpu(struct vmx_vcpu *vcpu)
                 vmcs_clear(vcpu->vmcs);
 
             vpid_sync_context(vcpu->vpid);
-            ept_sync_context(vcpu->eptp);
+            for (ept_index = 0; ept_index < vcpu->num_epts; ept_index++)
+                ept_sync_context(vcpu->eptp_list[ept_index]);
 
             vcpu->launched = 0;
             vmcs_load(vcpu->vmcs);
@@ -665,8 +673,10 @@ static void vmx_put_cpu(struct vmx_vcpu *vcpu)
 static void __vmx_sync_helper(void *ptr)
 {
     struct vmx_vcpu *vcpu = ptr;
+    unsigned ept_index;
 
-    ept_sync_context(vcpu->eptp);
+    for (ept_index = 0; ept_index < vcpu->num_epts; ept_index++)
+        ept_sync_context(vcpu->eptp_list[ept_index]);
 }
 
 struct sync_addr_args {
@@ -677,8 +687,10 @@ struct sync_addr_args {
 static void __vmx_sync_individual_addr_helper(void *ptr)
 {
     struct sync_addr_args *args = ptr;
+    unsigned ept_index;
 
-    ept_sync_individual_addr(args->vcpu->eptp,
+    for (ept_index = 0; ept_index < args->vcpu->num_epts; ept_index++)
+        ept_sync_individual_addr(args->vcpu->eptp_list[ept_index],
                  (args->gpa & ~(PAGE_SIZE - 1)));
 }
 
@@ -757,20 +769,6 @@ static void vmx_dump_cpu(struct vmx_vcpu *vcpu)
                 i * sizeof(long), val);
 
     printk(KERN_INFO "vmx: --- End VCPU Dump ---\n");
-}
-
-static u64 construct_eptp(unsigned long root_hpa)
-{
-    u64 eptp;
-
-    /* TODO write the value reading from MSR */
-    eptp = VMX_EPT_DEFAULT_MT |
-        VMX_EPT_DEFAULT_GAW << VMX_EPT_GAW_EPTP_SHIFT;
-    if (cpu_has_vmx_ept_ad_bits())
-        eptp |= VMX_EPT_AD_ENABLE_BIT;
-    eptp |= (root_hpa & PAGE_MASK);
-
-    return eptp;
 }
 
 /**
@@ -941,6 +939,9 @@ static void vmx_setup_vmcs(struct vmx_vcpu *vcpu)
     }
 
     vmcs_write64(EPT_POINTER, vcpu->eptp);
+    vmcs_write64(EPTP_LIST_ADDR, __pa(vcpu->eptp_list));
+
+    vmcs_write64(VM_FUNCTION_CONTROLS, 0x1); /* bit 1 -> ept switching */
 
     vmcs_write32(PAGE_FAULT_ERROR_CODE_MASK, 0);
     vmcs_write32(PAGE_FAULT_ERROR_CODE_MATCH, 0);
@@ -1046,9 +1047,12 @@ static struct vmx_vcpu * vmx_create_vcpu(struct dune_config *conf)
     vcpu->syscall_tbl = (void *) &dune_syscall_tbl;
 
     spin_lock_init(&vcpu->ept_lock);
-    if (vmx_init_ept(vcpu))
-        goto fail_ept;
-    vcpu->eptp = construct_eptp(vcpu->ept_root);
+
+    if (vmx_init_eptp_list(vcpu))
+        goto fail_eptp_list;
+
+    /* For the initial EPT_POINTER we use the first EPT for now. */
+    vcpu->eptp = vcpu->eptp_list[0];
 
     vmx_get_cpu(vcpu);
     vmx_setup_vmcs(vcpu);
@@ -1060,11 +1064,12 @@ static struct vmx_vcpu * vmx_create_vcpu(struct dune_config *conf)
         printk(KERN_INFO "vmx: enabled EPT A/D bits");
     }
     if (vmx_create_ept(vcpu))
-        goto fail_ept;
+        goto fail_eptp_list;
 
     return vcpu;
 
-fail_ept:
+
+fail_eptp_list:
     vmx_free_vpid(vcpu);
 fail_vpid:
     vmx_free_vmcs(vcpu->vmcs);
@@ -1079,9 +1084,15 @@ fail_vmcs:
  */
 static void vmx_destroy_vcpu(struct vmx_vcpu *vcpu)
 {
-    vmx_destroy_ept(vcpu);
+    unsigned ept_index;
+
     vmx_get_cpu(vcpu);
-    ept_sync_context(vcpu->eptp);
+
+    vmx_destroy_ept(vcpu);
+    for (ept_index = 0; ept_index < vcpu->num_epts; ept_index++)
+        ept_sync_context(vcpu->eptp_list[ept_index]);
+    vmx_free_eptp_list(vcpu);
+
     vmcs_clear(vcpu->vmcs);
     __get_cpu_var(local_vcpu) = NULL;
     vmx_put_cpu(vcpu);
@@ -1369,6 +1380,49 @@ static void vmx_step_instruction(void)
                    vmcs_read32(VM_EXIT_INSTRUCTION_LEN));
 }
 
+/* Adds a page to the secret mappings for the current EPT. Does *not*
+ * retroactively remove it from other EPTs!
+ */
+int vmx_secret_mapping_add(struct vmx_vcpu *vcpu, unsigned long gva,
+        unsigned long len)
+{
+    unsigned i;
+
+    /* gva and len must be page aligned */
+    if (gva & 0xfff)
+        return -EINVAL;
+    if (len & 0xfff)
+        return -EINVAL;
+    
+    for (i = 0; i < MAX_SECRET_MAPPINGS; i++)
+        if (vcpu->secret_mappings[i].gva == 0)
+            break;
+    if (i == MAX_SECRET_MAPPINGS)
+        return -ENOMEM;
+
+    //    printk("vmx: Adding secret mapping GVA: 0x%lx  len: 0x%lx  ept: %d\n", gva,
+    //        len, vmx_get_current_ept_index(vcpu));
+    vcpu->secret_mappings[i].gva = gva;
+    vcpu->secret_mappings[i].len = len;
+    vcpu->secret_mappings[i].ept_index = vmx_get_current_ept_index(vcpu);
+    return 0;
+}
+
+int vmx_allow_ept_mapping(struct vmx_vcpu *vcpu, unsigned long gpa,
+        unsigned long gva, int fault_flags)
+{
+    unsigned i;
+    for (i = 0; i < MAX_SECRET_MAPPINGS; i++)
+    {
+        struct secret_mapping *m = &vcpu->secret_mappings[i];
+        if (m->gva <= gva && gva < m->gva + m->len &&
+                m->ept_index != vmx_get_current_ept_index(vcpu))
+            return 0;
+    }
+
+    return 1;
+}
+
 static int vmx_handle_ept_violation(struct vmx_vcpu *vcpu)
 {
     unsigned long gva, gpa;
@@ -1380,6 +1434,8 @@ static int vmx_handle_ept_violation(struct vmx_vcpu *vcpu)
     gpa = vmcs_read64(GUEST_PHYSICAL_ADDRESS);
     vmx_put_cpu(vcpu);
 
+    //printk(KERN_ERR "EPT: ept violation %d %p %p %u\n", exit_qual, (void *)gva, (void *)gpa, vcpu->eptp);
+
     if (exit_qual & (1 << 6)) {
         printk(KERN_ERR "EPT: GPA 0x%lx exceeds GAW!\n", gpa);
         return -EINVAL;
@@ -1387,6 +1443,12 @@ static int vmx_handle_ept_violation(struct vmx_vcpu *vcpu)
 
     if (!(exit_qual & (1 << 7))) {
         printk(KERN_ERR "EPT: linear address is not valid, GPA: 0x%lx!\n", gpa);
+        return -EINVAL;
+    }
+
+    if (!vmx_allow_ept_mapping(vcpu, gpa, gva, exit_qual)) {
+        printk(KERN_ERR "EPT: policy disallowed mapping, GVA: 0x%lx GPA: 0x%lx ept: %d\n",
+                gva, gpa, vmx_get_current_ept_index(vcpu));
         return -EINVAL;
     }
 
@@ -1404,7 +1466,7 @@ static int vmx_handle_ept_violation(struct vmx_vcpu *vcpu)
 }
 
 static void vmx_handle_syscall(struct vmx_vcpu *vcpu)
-{
+{  
 #ifdef CPL0_VMCALL_ONLY
     /* Prevent CPL >0 (i.e. non-kernel code) from making vmcalls directly. */
     /* The current privilege level is always automatically stored by the cpu in
@@ -1417,6 +1479,12 @@ static void vmx_handle_syscall(struct vmx_vcpu *vcpu)
         return;
     }
 #endif
+
+    if (unlikely(vcpu->regs[VCPU_REGS_RAX] == DUNE_VMCALL_SECRET_MAPPING_ADD)) {
+        vcpu->regs[VCPU_REGS_RAX] = vmx_secret_mapping_add(vcpu,
+                vcpu->regs[VCPU_REGS_RDI], vcpu->regs[VCPU_REGS_RSI]);
+        return;
+    }
 
     if (unlikely(vcpu->regs[VCPU_REGS_RAX] > NUM_SYSCALLS)) {
         vcpu->regs[VCPU_REGS_RAX] = -EINVAL;
@@ -1591,6 +1659,8 @@ int vmx_launch(struct dune_config *conf, int64_t *ret_code)
             vmx_step_instruction();
         }
 
+        vcpu->eptp = vmcs_read64(EPT_POINTER);
+
         vmx_put_cpu(vcpu);
 
         if (ret == EXIT_REASON_VMCALL)
@@ -1731,6 +1801,11 @@ __init int vmx_init(void)
 
     if (!cpu_has_vmx_ept()) {
         printk(KERN_ERR "vmx: CPU is missing required feature 'EPT'\n");
+        return -EIO;
+    }
+
+    if (!cpu_has_vmx_vmfunc()) {
+        printk(KERN_ERR "vmx: CPU is missing required feature 'VMFUNC'\n");
         return -EIO;
     }
 

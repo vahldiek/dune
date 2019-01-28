@@ -18,6 +18,8 @@
 // XXX: Must match libdune/dune.h
 #define DUNE_SIGNAL_INTR_BASE 200
 
+#define DUNE_VMCALL_SECRET_MAPPING_ADD 512
+
 struct dune_config {
     __u64 rip;
     __u64 rsp;
