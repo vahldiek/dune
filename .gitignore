@@ -21,6 +21,7 @@ kern/dune.ko
 kern/dune.mod.c
 kern/modules.order
 kern/tmp/
+kern/out
 test/hello
 test/test
 test/test_sandbox
