@@ -25,4 +25,5 @@ test/hello
 test/test
 test/test_sandbox
 test/timetest
+test/test_*
 tags
