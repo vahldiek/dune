@@ -942,7 +942,6 @@ static void vmx_setup_vmcs(struct vmx_vcpu *vcpu)
     vmcs_write64(EPTP_LIST_ADDR, __pa(vcpu->eptp_list));
 
     vmcs_write64(VM_FUNCTION_CONTROLS, 0x1); /* bit 1 -> ept switching */
-    printk("vmfunc controls enabled\n");
 
     vmcs_write32(PAGE_FAULT_ERROR_CODE_MASK, 0);
     vmcs_write32(PAGE_FAULT_ERROR_CODE_MATCH, 0);
@@ -1465,9 +1464,7 @@ static int vmx_handle_ept_violation(struct vmx_vcpu *vcpu)
 }
 
 static void vmx_handle_syscall(struct vmx_vcpu *vcpu)
-{
-  printk("in vmx syscall handler");
-  
+{  
 #ifdef CPL0_VMCALL_ONLY
     /* Prevent CPL >0 (i.e. non-kernel code) from making vmcalls directly. */
     /* The current privilege level is always automatically stored by the cpu in
