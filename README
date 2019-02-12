@@ -97,3 +97,9 @@ Contact us at dune@scs.stanford.edu.
 
 Last edited: 10/05/12
 
+Modifications by Anjo
+=====================
+
+- Make kern/ compile with 3.16 kernel and enable VMFUNC (even if not all 
+  parameter are set correctly in the vmcs from kernel (CPU supports VMFUNC)
+- Modify test/hello to use VMFUNC to hide a secret
