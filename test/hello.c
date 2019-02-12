@@ -21,17 +21,6 @@
 			: "irm"(mapping)				\
 			: "%rax", "%rcx", "memory");
 
-static void recover(void)
-{
-	printf("hello: recovered from divide by zero\n");
-	exit(0);
-}
-
-static void divide_by_zero_handler(struct dune_tf *tf)
-{
-	printf("hello: caught divide by zero!\n");
-	tf->rip = (uintptr_t) &recover;
-}
 
 static size_t _pageground(size_t sz) {
     int pgz = sysconf(_SC_PAGESIZE);
@@ -73,7 +62,7 @@ int main(int argc, char *argv[])
 
 	vmfunc_switch(VMFUNC_SECURE_DOMAIN);
 
-	secret = vmfunc_malloc(sizeof(int));
+	secret = vmfunc_malloc(1024*1024*1024);
 	*secret = 7777;
 	printf("secret:%p %d\n", secret, *secret);
 

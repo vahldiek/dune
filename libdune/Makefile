@@ -1,5 +1,5 @@
 CC      = gcc
-CFLAGS  = -Wall -g -O3 -MD -I .. -fno-common
+CFLAGS  = -Wall -g -O3 -MD -I .. -fno-common -fno-pie -fPIC
 LDFLAGS = -static -L. -ldune
 OBJ     = entry.o dune.o vsyscall.o elf.o vm.o util.o page.o procmap.o dsmmap.o
 NOFPU_OBJ = trap.o
@@ -19,3 +19,5 @@ clean:
 %.o: %.c
 	$(CC) $(CFLAGS) $(EXTRA_FLAGS) -o $@ -c $<
 
+%.o: %.S
+	$(CC) $(CFLAGS) $(EXTRA_FLAGS) -o $@ -c $<

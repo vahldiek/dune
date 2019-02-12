@@ -1400,6 +1400,11 @@ int vmx_secret_mapping_add(struct vmx_vcpu *vcpu, unsigned long gva,
     if (i == MAX_SECRET_MAPPINGS)
         return -ENOMEM;
 
+
+  //  printk("vmx: Adding secret mapping GVA: 0x%lx  len: 0x%lx  ept: %d\n", gva,
+    //    len, vmx_get_current_ept_index(vcpu));
+
+
     vcpu->secret_mappings[i].gva = gva;
     vcpu->secret_mappings[i].len = len;
     vcpu->secret_mappings[i].ept_index = vmx_get_current_ept_index(vcpu);
@@ -1410,9 +1415,11 @@ int vmx_allow_ept_mapping(struct vmx_vcpu *vcpu, unsigned long gpa,
         unsigned long gva, int fault_flags)
 {
     unsigned i;
+//    printk("allow secret map? %p %p %d\n", (void*)gva, gpa, vmx_get_current_ept_index(vcpu));
     for (i = 0; i < MAX_SECRET_MAPPINGS; i++)
     {
         struct secret_mapping *m = &vcpu->secret_mappings[i];
+
         if (m->gva <= gva && gva < m->gva + m->len &&
                 m->ept_index != vmx_get_current_ept_index(vcpu))
             return 0;
@@ -1660,6 +1667,8 @@ int vmx_launch(struct dune_config *conf, int64_t *ret_code)
         vcpu->eptp = vmcs_read64(EPT_POINTER);
 
         vmx_put_cpu(vcpu);
+
+	//printk("vmx exit ret = %d\n", ret);
 
         if (ret == EXIT_REASON_VMCALL)
             vmx_handle_syscall(vcpu);
