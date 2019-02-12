@@ -25,6 +25,8 @@ extern struct vmx_capability vmx_capability;
 
 #define NR_AUTOLOAD_MSRS 8
 
+#define MAX_SECRET_MAPPINGS 16
+
 enum vmx_reg {
     VCPU_REGS_RAX = 0,
     VCPU_REGS_RCX = 1,
@@ -48,6 +50,12 @@ enum vmx_reg {
     NR_VCPU_REGS
 };
 
+struct secret_mapping {
+    unsigned long gva; /* beginning of page */
+    unsigned long len; /* bytes of this mapping (multiple of page size) */
+    unsigned long ept_index;
+};
+
 struct vmx_vcpu {
     int cpu;
     int vpid;
@@ -55,8 +63,6 @@ struct vmx_vcpu {
 
     struct mmu_notifier mmu_notifier;
     spinlock_t ept_lock;
-    unsigned long ept_root;
-    unsigned long eptp;
     bool ept_ad_enabled;
 
     u8  fail;
@@ -76,6 +82,14 @@ struct vmx_vcpu {
 
     struct vmcs *vmcs;
     void *syscall_tbl;
+
+    unsigned num_epts;        /* num active, the lists are always 512 entries */
+    unsigned long *eptp_list; /* list of EPT_POINTER-like values */
+    void **ept_root_list;     /* list of va pointers to ept roots */
+    unsigned long eptp;       /* current EPT_POINTER, read after every exit */
+    struct secret_mapping secret_mappings[MAX_SECRET_MAPPINGS]; /* (fixed size!)
+                                list of pages that are secret (only accessible
+                                in 1 EPT). */
 };
 
 extern __init int vmx_init(void);
@@ -83,9 +97,13 @@ extern void vmx_exit(void);
 
 extern int vmx_launch(struct dune_config *conf, int64_t *ret_code);
 
-extern int vmx_init_ept(struct vmx_vcpu *vcpu);
+extern void *vmx_alloc_ept(void);
 extern int vmx_create_ept(struct vmx_vcpu *vcpu);
 extern void vmx_destroy_ept(struct vmx_vcpu *vcpu);
+extern int vmx_init_eptp_list(struct vmx_vcpu *vcpu);
+extern void vmx_free_eptp_list(struct vmx_vcpu *vcpu);
+
+extern unsigned vmx_get_current_ept_index(struct vmx_vcpu *vcpu);
 
 extern int
 vmx_do_ept_fault(struct vmx_vcpu *vcpu, unsigned long gpa,
